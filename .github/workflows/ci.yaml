@@ -1,0 +1,149 @@
+#CI/CD Workflow for Python cod
+name: CI-CD workflow for python code
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_ID: 'poc-project-140697' # update to your Google Cloud project ID
+  REGION: 'us-central1' # update to your region
+  REPOSITORY: 'cloudrun-python'
+  SERVICE: 'service-cloudrun-python'
+      
+      
+
+# permissions for OIDC connectionn
+
+permissions:
+    id-token: write
+    contents: read
+    checks: write
+
+jobs:
+        # CI job
+        build:
+          runs-on: ubuntu-latest
+                          
+          # Checkout code from the repository
+          steps:
+          - name: 'Checkout code'
+            uses: 'actions/checkout@v3'
+      
+         # Set up Python environment
+          - name: Set up Python
+            uses: actions/setup-python@v2
+            with:
+                python-version: '3.x'
+
+         # Install dependencies
+          - name: Install dependenciess
+            run: |
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+              if  [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+         # Run unit tests and coverage report
+          - name: Run Unit Tests and generate coverage report
+            run: |
+             cd src
+             python -m unittest -v
+             python -m pip install --upgrade pip
+             pip install coverage
+             coverage run -m unittest
+             coverage report
+             coverage html
+
+         # Upload code coverage report as artifacts
+          - name: Archive code coverage html report
+            uses: actions/upload-artifact@v4
+            with:
+             name: code-coverage-report
+             path: src/htmlcov
+
+
+        #    sonar scan
+        #   - name: SonarQube Scan
+        #     uses: actions/checkout@v2
+        #     with:
+        #         fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
+        #   - uses: sonarsource/sonarqube-scan-action@master
+        #     env:
+        #         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        #         SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+
+        # # Check sonarqube quality gate using script to make a GET request to the SonarQube API endpoint and retrieve the status of the quality gate
+        #   - name: Check SonarQube Quality Gate
+        #     run: |
+        #      status=$(curl -s "${{ secrets.SONAR_HOST_URL}}/api/qualitygates/project_status?projectKey=${{ secrets.SONAR_PROJECT_KEY }}" -u "${{ secrets.SONAR_TOKEN }}": | jq -r '.projectStatus.status')
+        #      if [[ "$status" != "OK" ]]; then
+        #      echo "SonarQube quality gate check failed."
+        #      fi 
+
+
+          # - name: Build project and package jar
+          #   run: mvn package
+      
+          - name: Authenticate to Google Cloud using OIDC
+            id: auth
+            uses: google-github-actions/auth@v2
+            with:
+              token_format: 'access_token'
+              workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+              service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+      
+          - name: Authenticate Docker to Artifact Registry
+            run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+       
+
+          - name: Build and Push Container to Artifact Registry
+            run: |
+              DOCKER_IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ github.sha }}"
+              docker build -t $DOCKER_IMAGE .
+              docker push $DOCKER_IMAGE
+
+
+    # Push to Artifact Registry if scan is successful
+          - name: Push Docker Image to Artifact Registry
+            if: success()
+            run: |
+              DOCKER_IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ github.sha }}"
+              docker push $DOCKER_IMAGE
+      
+        cd:
+          needs: build
+          runs-on: ubuntu-latest
+          steps:
+          - name: Authenticate to Google Cloud using OIDC
+            id: auth
+            uses: google-github-actions/auth@v2
+            with:
+              token_format: 'access_token'
+              workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+              service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+
+  
+          - name: Deploy to Cloud Run
+            run: |
+              gcloud run deploy ${{ env.SERVICE }} \
+                --image=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ github.sha }} \
+                --quiet \
+                --region=${{ env.REGION }} \
+                --project ${{ env.PROJECT_ID }} \
+                --format json \
+                --update-env-vars SERVICE_NAME="Python Service" \
+                --platform=managed \
+                --service-account raj-service-account@poc-project-140697.iam.gserviceaccount.com \
+                --allow-unauthenticated \
+                --no-use-http2 \
+                --port 5000 \
+                --timeout 300s
+  
+
+             
+         
+         
+        
